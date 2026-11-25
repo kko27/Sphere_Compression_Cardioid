@@ -11,3 +11,5 @@
 /sign_harmonized/
 /sign_harmonized_v2/
 /snapshots/
+/mesh_refined/ 
+__pycache__/
