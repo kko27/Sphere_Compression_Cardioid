@@ -45,6 +45,9 @@ STRAINS = [0.0, 0.05, 0.1, 0.15, 0.2, 0.25]
 HERTZ_FIT_MAX = 0.10   # Hertz C fitted to eps_z <= this
 INCOMP_FIT_MIN = 0.15  # Incompressible scale K fitted to eps_z >= this
 
+# Poisson ratio for the Zhang et al. analytical curves (must match <Poisson_ratio> in solver_contact.xml).
+NU = 0.45
+
 
 def hoop_strain_tensor(X, E):
     """Option 1: rotate the Green-Lagrange tensor into e_theta.
@@ -106,8 +109,12 @@ def write_pvd(steps):
         f.write("  </Collection>\n</VTKFile>\n")
 
 
-def plot_model_comparison(eps_z, mu, sd):
+def plot_model_comparison(eps_z, mu, sd, mu_eng, sd_eng):
     """Tensor GL hoop strain vs. two analytical forms explaining the non-linearity.
+
+    mu, sd: tensor Green-Lagrange hoop strain (used for all fits).
+    mu_eng, sd_eng: geometric engineering hoop strain r/R - 1, plotted for comparison only
+    (the Zhang et al. curves are small-strain/engineering quantities).
 
     Hertz contact:            eps_t = C * eps_z^1.5, C fitted to the low-strain means
                               (eps_z <= HERTZ_FIT_MAX).
@@ -124,6 +131,13 @@ def plot_model_comparison(eps_z, mu, sd):
     def fit_scale(f, mask):
         g = f(eps_z[mask])
         return np.sum(mu[mask] * g) / np.sum(g**2)
+
+    # Zhang et al. (2007), Comput. Mater. Sci. 39:305, doi:10.1016/j.commatsci.2006.06.009.
+    # eps_z = eps_C = h/R (h = approach at one plate), eps_t = eps_E = u(R,R)/R.
+    def zhang_fe_form(e):
+        # FE fit, Eqs. (20)-(22): eps_E = (0.04 eps_C + 0.5 eps_C^2) * f_eps(nu); fitted to eps_C <= 0.2.
+        f_eps = 0.477 + 1.277*NU + 1.547*NU**2
+        return (0.04*e + 0.5*e**2) * f_eps
 
     C = fit_scale(hertz_form, eps_z <= HERTZ_FIT_MAX + 1e-12)
     K = fit_scale(incomp_form, eps_z >= INCOMP_FIT_MIN - 1e-12)
@@ -143,11 +157,16 @@ def plot_model_comparison(eps_z, mu, sd):
     hertz = C * hertz_form(z)
     incomp = K * incomp_form(z)
     combined = combined_form(z)
+    zhang_fe = zhang_fe_form(z)
 
     fig, ax = plt.subplots(figsize=(8, 6))
     ax.fill_between(100 * eps_z, 100 * (mu - sd), 100 * (mu + sd), color="tab:blue", alpha=0.15, lw=0)
     ax.plot(100 * eps_z, 100 * mu, color="tab:blue", marker="o", ls="-", lw=1.5,
             label="FE: tensor (Green–Lagrange)")
+    ax.fill_between(100 * eps_z, 100 * (mu_eng - sd_eng), 100 * (mu_eng + sd_eng),
+                    color="tab:gray", alpha=0.15, lw=0)
+    ax.plot(100 * eps_z, 100 * mu_eng, color="tab:gray", marker="^", ls="-", lw=1.5,
+            label="FE: geometric engineering ($r/R-1$)")
     ax.plot(100 * z, 100 * hertz, color="tab:orange", ls="--", lw=2,
             label=rf"Hertz: $\epsilon_\theta = {C:.3g}\,\epsilon_z^{{1.5}}$"
                   rf" (fit $\epsilon_z \leq {100 * HERTZ_FIT_MAX:.0f}\%$)")
@@ -156,6 +175,8 @@ def plot_model_comparison(eps_z, mu, sd):
                   rf" (fit $\epsilon_z \geq {100 * INCOMP_FIT_MIN:.0f}\%$)")
     ax.plot(100 * z, 100 * combined, color="tab:purple", ls=":", lw=2.5,
             label=rf"Combined: ${C:.3g}\,\epsilon_z^{{1.5}}(1-\epsilon_z)^{{-{n:.2f}}}$")
+    ax.plot(100 * z, 100 * zhang_fe, color="tab:red", ls="--", lw=2,
+            label=rf"Zhang et al. FE fit, Eqs. (20)–(22) ($\nu={NU:g}$)")
 
     ax.set_xlabel("Compressive strain (%)", fontsize=26)
     ax.set_ylabel("Equatorial hoop strain (%)", fontsize=26)
@@ -167,10 +188,12 @@ def plot_model_comparison(eps_z, mu, sd):
     print(f"Hertz fit (eps_z <= {HERTZ_FIT_MAX}): C = {C:.4g}")
     print(f"Incompressible fit (eps_z >= {INCOMP_FIT_MIN}): K = {K:.4g}")
     print(f"Combined fit (C fixed, all eps_z > 0): n = {n:.4g}")
-    for e, m, h, i, cb in zip(eps_z, mu, C * hertz_form(eps_z), K * incomp_form(eps_z),
-                              combined_form(eps_z)):
-        print(f"  eps_z={e:.2f}: FE={100 * m:.3f}%  Hertz={100 * h:.3f}%  "
-              f"Incomp={100 * i:.3f}%  Combined={100 * cb:.3f}%")
+    for e, m, me, h, i, cb, t, zf in zip(eps_z, mu, mu_eng, C * hertz_form(eps_z),
+                                         K * incomp_form(eps_z), combined_form(eps_z),
+                                         tatara_form(eps_z), zhang_fe_form(eps_z)):
+        print(f"  eps_z={e:.2f}: FE={100 * m:.3f}%  FE_eng={100 * me:.3f}%  Hertz={100 * h:.3f}%  "
+              f"Incomp={100 * i:.3f}%  Combined={100 * cb:.3f}%  "
+              f"Tatara(13)={100 * t:.3f}%  Zhang(20-22)={100 * zf:.3f}%")
     print(f"Saved model comparison to {os.path.join(OUTPUT_DIR, OUTPUT_MODEL_PLOT)}")
 
 
@@ -229,7 +252,8 @@ def main():
     fig.tight_layout()
     fig.savefig(os.path.join(OUTPUT_DIR, OUTPUT_PLOT))
 
-    plot_model_comparison(np.asarray(STRAINS), means["tensor_GL"], stds["tensor_GL"])
+    plot_model_comparison(np.asarray(STRAINS), means["tensor_GL"], stds["tensor_GL"],
+                          means["geometric_eng"], stds["geometric_eng"])
 
     with open(os.path.join(OUTPUT_DIR, OUTPUT_TEXT), "w") as f:
         f.write("Strain (%),"
